@@ -1,41 +1,49 @@
-# ПМООС-RAG v0.11.0 — зависимости.
-# ВАЖНО: PyTorch ставится ОТДЕЛЬНО и ПЕРВЫМ (install.bat), из CUDA-индекса:
+# PMOOS-RAG dependencies.
+# NOTE: this file is intentionally ASCII-only. pip on Russian Windows reads
+# requirements.txt with the cp1251 locale codec, and non-ASCII (Cyrillic)
+# comments make pip crash with UnicodeDecodeError before any download.
+#
+# IMPORTANT: PyTorch is installed SEPARATELY and FIRST (see install.bat) from
+# the CUDA index:
 #   pip install torch==2.6.0 --index-url https://download.pytorch.org/whl/cu124
-# Здесь torch НЕ указан намеренно, чтобы pip не подтянул CPU-сборку как зависимость.
-# Нужна версия torch>=2.6 — это закрывает CVE-2025-32434 (safetensors-загрузка весов).
+# torch is NOT listed here on purpose, so pip does not pull a CPU-only build.
+# torch>=2.6 is required (fixes CVE-2025-32434, safetensors weight loading).
 
-# --- интерфейс / запуск ---
-streamlit>=1.36
+# --- UI / launch ---
+streamlit>=1.49
 
-# --- RAG: векторная база, эмбеддинги, реранкер, гибридный поиск ---
+# --- scientific core (needed by PyTorch/pandas; installed early) ---
+numpy>=1.26,<2.3
+
+# --- RAG: vector DB, embeddings, reranker, hybrid search ---
 qdrant-client>=1.9
 sentence-transformers>=3.0
 transformers>=4.41
 accelerate>=0.30
 rank-bm25>=0.2.2
 
-# --- разбор документов / OCR ---
+# --- document parsing / OCR ---
 pymupdf>=1.24
 pdfplumber>=0.11
 python-docx>=1.1
 openpyxl>=3.1
 pandas>=2.0
-pytesseract>=0.3.10        # требует системный Tesseract OCR (для сканов; необязательно)
+pytesseract>=0.3.10
 pillow>=10.0
 
-# --- граф связей и визуализация ---
+# --- dependency graph and visualization ---
 networkx>=3.2
 pyvis>=0.3.2
 
-# --- конфигурация / ключи ---
+# --- configuration / keys ---
 python-dotenv>=1.0
 pyyaml>=6.0
 
-# --- провайдеры ИИ ---
-openai>=1.30               # совместим с DeepSeek (base_url) и OpenAI
-anthropic>=0.30            # Claude
-google-generativeai>=0.7   # Gemini
-requests>=2.31             # Ollama REST + прочее
+# --- AI providers ---
+openai>=1.30
+anthropic>=0.30
+google-generativeai>=0.7
+requests>=2.31
 
-# --- утилиты ---
+# --- utilities ---
 tqdm>=4.66

@@ -57,6 +57,8 @@ ENV_KEYS: dict[str, tuple[str, ...]] = {
     "openai": ("OPENAI_API_KEY",),
     "gemini": ("GEMINI_API_KEY", "GOOGLE_API_KEY"),
     "anthropic": ("ANTHROPIC_API_KEY",),
+    "kimi": ("MOONSHOT_API_KEY", "KIMI_API_KEY"),
+    "mistral": ("MISTRAL_API_KEY",),
     "ollama": (),  # локально, ключ не нужен
 }
 
@@ -98,6 +100,24 @@ DEFAULT_AI: dict[str, Any] = {
             "extract": "claude-3-5-haiku-latest",
             "expand": "claude-3-5-haiku-latest",
             "supports_json_mode": False,
+        },
+        "kimi": {
+            # Kimi / Moonshot AI — OpenAI-совместимый API.
+            # Для РФ/СНГ может подойти .ai; в Китае — https://api.moonshot.cn/v1
+            "base_url": "https://api.moonshot.ai/v1",
+            "answer": "moonshot-v1-32k",
+            "review": "moonshot-v1-32k",
+            "extract": "moonshot-v1-8k",
+            "expand": "moonshot-v1-8k",
+            "supports_json_mode": True,
+        },
+        "mistral": {
+            "base_url": "https://api.mistral.ai/v1",
+            "answer": "mistral-large-latest",
+            "review": "mistral-large-latest",
+            "extract": "mistral-small-latest",
+            "expand": "mistral-small-latest",
+            "supports_json_mode": True,
         },
         "ollama": {
             "base_url": "http://localhost:11434",

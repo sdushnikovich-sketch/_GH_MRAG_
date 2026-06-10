@@ -1,4 +1,4 @@
-"""ПМООС-RAG v0.14.0 «Modular» — единый интерфейс (Streamlit).
+"""ПМООС-RAG v0.14.6 «Modular» — единый интерфейс (Streamlit).
 
 Запуск:  streamlit run app/hub.py
 Модули также запускаются по отдельности из папки modules/ (CLI).
@@ -97,6 +97,7 @@ def sidebar() -> tuple[str, str]:
 # ─────────────────────────────── модули ───────────────────────────────
 def tab_m1(project: str, object_type: str) -> None:
     st.header("МОДУЛЬ 1 · Загрузка и систематизация ПД (ПП-87)")
+    C.module_ai_selector(_cfg(), "module1")
     st.caption("Файлы проекта НЕ сохраняются: в базе остаются только карта разделов "
                "и (после М2) векторные чанки. Временные файлы можно удалить после индексации.")
 
@@ -107,18 +108,18 @@ def tab_m1(project: str, object_type: str) -> None:
     )
     c1, c2, c3 = st.columns(3)
     with c1:
-        if st.button("📥 Загрузить и систематизировать", disabled=not files, use_container_width=True):
+        if st.button("📥 Загрузить и систематизировать", disabled=not files, width='stretch'):
             n = _save_uploads(project, files)
             from pmoos.ingest.inventory import build_inventory
             build_inventory(project, object_type=object_type)
             st.success(f"Учтено файлов: {n}. Карта разделов обновлена.")
     with c2:
-        if st.button("🔁 Пересобрать карту разделов", use_container_width=True):
+        if st.button("🔁 Пересобрать карту разделов", width='stretch'):
             from pmoos.ingest.inventory import build_inventory
             build_inventory(project, object_type=object_type)
             st.success("Карта разделов пересобрана.")
     with c3:
-        if st.button("🧹 Очистить временные файлы", use_container_width=True,
+        if st.button("🧹 Очистить временные файлы", width='stretch',
                      help="Удалить загруженные файлы ПД (карта разделов и база сохранятся)"):
             import shutil
             up = project_paths(project)["uploads"]
@@ -176,6 +177,7 @@ def tab_m2(project: str, object_type: str) -> None:
 
 def tab_m3(project: str, object_type: str) -> None:
     st.header("МОДУЛЬ 3 · Граф связей разделов и каскад изменений")
+    C.module_ai_selector(_cfg(), "module3")
     from pmoos.graph.dependency import build_and_save, to_vis
     from pmoos.graph.cascade import downstream
 
@@ -183,18 +185,23 @@ def tab_m3(project: str, object_type: str) -> None:
     vis = to_vis(g)
     st.write(f"Узлов: {g.number_of_nodes()} · связей: {g.number_of_edges()}")
 
-    # пытаемся показать интерактивный граф (pyvis), иначе — таблица связей
-    from pmoos.graph.dependency import write_vis_html
-    try:
-        html_path = write_vis_html(project, vis)
-    except Exception:
-        html_path = None
-    if html_path and Path(html_path).exists():
-        components.html(Path(html_path).read_text(encoding="utf-8"), height=620, scrolling=True)
-    else:
-        st.dataframe([{"Источник": e["from"], "→": "→", "Потребитель": e["to"],
-                       "По данным": e.get("title", "")} for e in vis["edges"]],
-                     use_container_width=True, hide_index=True)
+    # По умолчанию — таблица связей (быстро). Интерактивный граф рисуем по запросу
+    # (тяжелее и каждый раз перерисовывается), плюс это убирает лишние предупреждения.
+    show_graph = st.toggle("Показать интерактивный граф (pyvis)", value=False, key="m3_show_graph")
+    if show_graph:
+        from pmoos.graph.dependency import write_vis_html
+        try:
+            html_path = write_vis_html(project, vis)
+            html = Path(html_path).read_text(encoding="utf-8")
+            try:
+                components.html(html, height=620, scrolling=True)
+            except Exception:
+                _download(html_path)  # на крайний случай — скачать HTML
+        except Exception as e:  # noqa: BLE001
+            st.caption(f"Не удалось построить интерактивный граф: {e}")
+    st.dataframe([{"Источник": e["from"], "→": "→", "Потребитель": e["to"],
+                   "По данным": e.get("title", "")} for e in vis["edges"]],
+                 width='stretch', hide_index=True)
 
     st.subheader("Каскад изменений")
     nodes = sorted(n["id"] for n in vis["nodes"])
@@ -205,7 +212,7 @@ def tab_m3(project: str, object_type: str) -> None:
         if res["affected"]:
             st.dataframe([{"Затронуто": a["label"], "Глубина": a["depth"],
                            "Путь": " → ".join(a["via"])} for a in res["affected"]],
-                         use_container_width=True, hide_index=True)
+                         width='stretch', hide_index=True)
             st.info("Порядок пересчёта: " + " → ".join(res["order"]))
         else:
             st.success("Прямых зависимых разделов не обнаружено.")
@@ -216,7 +223,7 @@ def tab_m3(project: str, object_type: str) -> None:
                "(растёт при приёме ответов и по кнопке ниже). Хранится на диске, без сервера.")
     from pmoos.graph.knowledge import update_from_project, stats, to_vis as kg_vis
     cols = st.columns([1, 2])
-    if cols[0].button("➕ Обновить граф знаний из этого проекта", use_container_width=True):
+    if cols[0].button("➕ Обновить граф знаний из этого проекта", width='stretch'):
         kn = update_from_project(project)
         st.success(f"Добавлено сущностей: {kn['entities']}. Узлов: {kn['nodes']}, связей: {kn['edges']}.")
     s = stats()
@@ -233,10 +240,7 @@ def tab_m3(project: str, object_type: str) -> None:
 def tab_m4(project: str, object_type: str) -> None:
     st.header("МОДУЛЬ 4 · Ответы на замечания ПМООС")
     cfg = _cfg()
-    prov = cfg.resolve_provider("module4")
-    if not cfg.has_key(prov):
-        st.warning(f"Для модуля 4 выбран провайдер «{prov}», но ключ не задан. "
-                   f"Укажите ключ в настройках ИИ слева или выберите Ollama.")
+    C.module_ai_selector(cfg, "module4")
 
     try:
         from pmoos.memory import kb_size
@@ -257,9 +261,9 @@ def tab_m4(project: str, object_type: str) -> None:
         remarks_path.write_bytes(rfile.getbuffer())
 
     c1, c2, c3 = st.columns(3)
-    run1 = c1.button("① Найти ответы", use_container_width=True)
-    run2 = c2.button("② Проверить правки", use_container_width=True)
-    run3 = c3.button("③ Финальная проверка", use_container_width=True)
+    run1 = c1.button("① Найти ответы", width='stretch')
+    run2 = c2.button("② Проверить правки", width='stretch')
+    run3 = c3.button("③ Финальная проверка", width='stretch')
 
     if run1:
         from pmoos.pipeline.block1_answers import run_block1
@@ -327,7 +331,7 @@ def _render_answers(project: str) -> None:
                 st.markdown("**Источники:**")
                 st.dataframe([{"Раздел": s.get("section", ""), "Файл": s.get("file", ""),
                                "Место": s.get("loc", ""), "Релевантность": s.get("score", "")}
-                              for s in srcs], use_container_width=True, hide_index=True)
+                              for s in srcs], width='stretch', hide_index=True)
             if a.get("cascade_text"):
                 st.caption("Каскад: " + a["cascade_text"])
             b1, b2, b3 = st.columns(3)
@@ -355,7 +359,7 @@ def tab_m5(project: str, object_type: str) -> None:
         oos_path = up / oos.name
         oos_path.write_bytes(oos.getbuffer())
 
-    if st.button("📝 Сформировать документы", use_container_width=True):
+    if st.button("📝 Сформировать документы", width='stretch'):
         from pmoos.output.docx_writer import build_corrected_oos_docx
         from pmoos.output.answers_table import build_answers_table_docx, build_answers_table_xlsx
         with st.spinner("Формирование .docx/.xlsx…"):
@@ -380,14 +384,14 @@ def tab_m6(project: str, object_type: str) -> None:
     st.header("МОДУЛЬ 6 · Выгрузка для УПРЗА «Эколог» / ИНТЕГРАЛ")
     st.caption("Источники выбросов + перечень ЗВ (коды) + задание на ввод. "
                "Геометрию источников и привязку значений заполняет инженер.")
-    if st.button("📤 Сформировать выгрузку", use_container_width=True):
+    if st.button("📤 Сформировать выгрузку", width='stretch'):
         from pmoos.output.uprza_export import build_uprza_export, collect_emissions
         rows, extra = collect_emissions(project)
         paths = build_uprza_export(project)
         st.success(f"Готово. Распознано ЗВ: {len(rows)}.")
         if rows:
             st.dataframe([{"Код ЗВ": r["code"], "Наименование": r["name"]} for r in rows],
-                         use_container_width=True, hide_index=True)
+                         width='stretch', hide_index=True)
         for p in paths.values():
             _download(p)
 
@@ -395,12 +399,20 @@ def tab_m6(project: str, object_type: str) -> None:
 
 
 # ─────────────────────────────── утилиты вывода ───────────────────────────────
+def _uid() -> int:
+    """Монотонный счётчик за один рендер — гарантирует уникальные ключи виджетов."""
+    n = st.session_state.get("_uid", 0)
+    st.session_state["_uid"] = n + 1
+    return n
+
+
 def _download(path) -> None:
     path = Path(path)
     if not path.exists():
         return
     with path.open("rb") as f:
-        st.download_button(f"⬇️ {path.name}", f.read(), file_name=path.name, key=f"dl_{path.name}")
+        st.download_button(f"⬇️ {path.name}", f.read(), file_name=path.name,
+                           key=f"dl_{_uid()}_{path.name}")
 
 
 def _list_outputs(project: str) -> None:
@@ -415,6 +427,24 @@ def _list_outputs(project: str) -> None:
 
 # ─────────────────────────────── main ───────────────────────────────
 def main() -> None:
+    st.session_state["_uid"] = 0  # сброс счётчика ключей на каждый рендер
+    # увеличенный шрифт (замечание «не видно»)
+    st.markdown(
+        """
+        <style>
+          html, body, [class*="css"], .stMarkdown, .stText, p, li, label,
+          .stTabs [data-baseweb="tab"] { font-size: 17px !important; }
+          .stDataFrame, .stTable { font-size: 16px !important; }
+          h1 { font-size: 30px !important; }
+          h2 { font-size: 24px !important; }
+          h3 { font-size: 20px !important; }
+          .stButton button, .stDownloadButton button { font-size: 16px !important; }
+          section[data-testid="stSidebar"] * { font-size: 16px !important; }
+          div[data-testid="stMetricValue"] { font-size: 22px !important; }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
     project, object_type = sidebar()
     if not project:
         st.info("Создайте или выберите проект слева, чтобы начать.")

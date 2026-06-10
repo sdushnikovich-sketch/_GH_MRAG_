@@ -184,7 +184,7 @@ def chat(cfg: Config, messages: list[Message], *, module: str | None = None,
 
     api_key = cfg.api_key(provider)
     base = cfg.base_url(provider)
-    if provider in ("deepseek", "openai"):
+    if provider in ("deepseek", "openai", "kimi", "mistral"):
         out = _openai_like(base, api_key, model, messages, temperature, max_tokens, json_mode)
     elif provider == "gemini":
         out = _gemini(api_key, model, messages, temperature, max_tokens, json_mode)

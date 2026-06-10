@@ -15,7 +15,7 @@ _ROOT = Path(__file__).resolve().parent.parent
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-PROVIDERS = ["deepseek", "openai", "gemini", "anthropic", "ollama"]
+PROVIDERS = ["deepseek", "openai", "gemini", "anthropic", "kimi", "mistral", "ollama"]
 MODULES = [
     ("module1", "М1 · Систематизация ПД"),
     ("module3", "М3 · Граф связей"),
@@ -23,11 +23,69 @@ MODULES = [
 ]
 PROVIDER_LABEL = {
     "deepseek": "DeepSeek", "openai": "OpenAI (GPT)", "gemini": "Google Gemini",
-    "anthropic": "Anthropic (Claude)", "ollama": "Ollama (локально)",
+    "anthropic": "Anthropic (Claude)", "kimi": "Kimi (Moonshot)",
+    "mistral": "Mistral", "ollama": "Ollama (локально)",
 }
 
 
 # ─────────────────────────────── НАСТРОЙКИ ИИ ───────────────────────────────
+def module_ai_selector(cfg, module: str, *, title: str = "🤖 ИИ для этого модуля") -> None:
+    """Компактный выбор провайдера/модели/ключа ПРЯМО во вкладке модуля
+    (замечание: «модель по модулям выбирается в соответствующих вкладках»)."""
+    from pmoos.config import write_env_key
+    from pmoos.core.ollama_utils import ollama_available, list_installed_models
+
+    cur = cfg.resolve_provider(module)
+    with st.expander(title, expanded=not (cfg.has_key(cur) or cur == "ollama")):
+        opts = ["(по умолчанию)"] + PROVIDERS
+        override = cfg.get(f"ai.modules.{module}.provider")
+        idx = (PROVIDERS.index(override) + 1) if override in PROVIDERS else 0
+        choice = st.selectbox(
+            "Провайдер для модуля", opts, index=idx,
+            format_func=lambda p: PROVIDER_LABEL.get(p, p) if p != "(по умолчанию)" else "(по умолчанию)",
+            key=f"msel_{module}",
+        )
+        if choice == "(по умолчанию)":
+            if override:
+                cfg.set(f"ai.modules.{module}", {}); cfg.save(); st.rerun()
+            provider = cfg.default_provider()
+        else:
+            if choice != override:
+                cfg.set(f"ai.modules.{module}.provider", choice); cfg.save(); st.rerun()
+            provider = choice
+
+        st.caption(f"Активный провайдер: **{PROVIDER_LABEL.get(provider, provider)}** · "
+                   f"модель ответа/проверки: `{cfg.model_for(provider, 'answer')}` · "
+                   f"парсинг: `{cfg.model_for(provider, 'extract')}`")
+
+        if provider == "ollama":
+            if ollama_available():
+                installed = list_installed_models()
+                if installed:
+                    cur_model = cfg.model_for("ollama", "answer")
+                    mdl = st.selectbox("Локальная модель Ollama", installed,
+                                       index=installed.index(cur_model) if cur_model in installed else 0,
+                                       key=f"mol_{module}")
+                    if mdl != cur_model:
+                        for role in ("answer", "review", "extract", "expand"):
+                            cfg.set(f"ai.providers.ollama.{role}", mdl)
+                        cfg.save(); st.success(f"Модель Ollama: {mdl}"); st.rerun()
+                else:
+                    st.warning("Ollama запущена, но модели не найдены. Напр.: `ollama pull qwen2.5:7b-instruct`")
+            else:
+                st.warning("Ollama не обнаружена на :11434. Запустите `ollama serve` "
+                           "(или задайте адрес в переменной OLLAMA_HOST).")
+        else:
+            if cfg.has_key(provider):
+                st.caption("Ключ API задан ✓")
+            else:
+                val = st.text_input(f"Ключ API {PROVIDER_LABEL.get(provider, provider)} (ввести вручную)",
+                                    value="", type="password", key=f"mkey_{module}")
+                if val:
+                    write_env_key(provider, val)
+                    st.success("Ключ сохранён в .env"); st.rerun()
+
+
 def ai_settings_panel(cfg) -> None:
     from pmoos.config import write_env_key
     from pmoos.core.ollama_utils import ollama_available, list_installed_models
@@ -93,7 +151,7 @@ def ai_settings_panel(cfg) -> None:
             "Парсинг/Перефраз": cfg.model_for(prov, "extract"),
             "Ключ": "✓" if cfg.has_key(prov) else "✗",
         })
-    st.dataframe(rows, use_container_width=True, hide_index=True)
+    st.dataframe(rows, width='stretch', hide_index=True)
 
     with st.expander("Переопределить провайдер для отдельного модуля"):
         for mod, label in MODULES:
@@ -144,7 +202,7 @@ def section_map(project: str, object_type: str) -> None:
         "Раздел": r["name"] + (" (доп.)" if r.get("extra") else ""),
         "Файлов": r["n_files"],
     } for r in rows]
-    st.dataframe(table, use_container_width=True, hide_index=True)
+    st.dataframe(table, width='stretch', hide_index=True)
 
     present = sum(1 for r in rows if r["present"])
     st.caption(f"Присутствует разделов: {present} · отсутствует обязательных: "
@@ -187,20 +245,20 @@ def indexing_panel(project: str, object_type: str) -> None:
 
     c1, c2, c3, c4 = st.columns(4)
     with c1:
-        if st.button("▶ Индексировать", disabled=running, use_container_width=True):
+        if st.button("▶ Индексировать", disabled=running, width='stretch'):
             start_background(project, object_type=object_type)
             st.rerun()
     with c2:
-        if st.button("⏸ Пауза", disabled=not running, use_container_width=True):
+        if st.button("⏸ Пауза", disabled=not running, width='stretch'):
             request_pause(project)
             st.rerun()
     with c3:
-        if st.button("⏯ Продолжить", disabled=running, use_container_width=True):
+        if st.button("⏯ Продолжить", disabled=running, width='stretch'):
             clear_pause(project)
             start_background(project, object_type=object_type)
             st.rerun()
     with c4:
-        if st.button("🔄 Обновить", use_container_width=True):
+        if st.button("🔄 Обновить", width='stretch'):
             st.rerun()
 
     st.progress(min(1.0, s["percent"] / 100.0),
@@ -209,10 +267,37 @@ def indexing_panel(project: str, object_type: str) -> None:
     badge = {"running": "🟢 выполняется", "paused": "🟡 пауза", "done": "✅ завершено",
              "error": "🔴 ошибка", "idle": "⚪ не запускалось"}.get(s["status"], s["status"])
     st.write(f"Статус: {badge}" + (f" · {s.get('current_file','')}" if s.get("current_file") else ""))
+    if s["status"] == "running":
+        st.caption(f"Пульс процесса: {s.get('heartbeat_age', '—')} с назад "
+                   f"(норма ≤ 10 с; статус обновляйте кнопкой «Обновить»)")
     if s.get("message"):
-        st.caption(s["message"])
-    st.caption("Индексация идёт в фоне и продолжится даже при закрытии вкладки; "
-               "пауза/возобновление переживают перезапуск.")
+        if s["status"] == "error":
+            st.error(s["message"])
+        elif s["status"] == "done":
+            st.success(s["message"])
+        else:
+            st.info(s["message"])
+    d1, d2 = st.columns([1, 3])
+    with d1:
+        if st.button("🛑 Сбросить статус", width='stretch', key="idx_reset",
+                     help="Если статус «завис» — сбросьте и запустите индексацию заново. "
+                          "Прогресс по уже обработанным файлам сохраняется."):
+            from pmoos.index.indexer import reset_state
+            reset_state(project)
+            st.rerun()
+    with d2:
+        st.caption("Индексация идёт в фоне и переживает закрытие вкладки; пауза/возобновление "
+                   "переживают перезапуск. Первый запуск скачивает модель bge-m3 (~2.3 ГБ) — "
+                   "ход загрузки виден в журнале ниже; при сбое там же будет точная причина.")
+
+    from pmoos.index.indexer import log_tail, log_path
+    with st.expander("📜 Журнал индексации (index_log.txt)"):
+        tail = log_tail(project, 60)
+        if tail:
+            st.code(tail, language="text")
+        else:
+            st.caption("Журнал пока пуст — появится после запуска индексации.")
+        st.caption(f"Файл журнала: {log_path(project)}")
 
 
 # ─────────────────────────────── КОНТАКТЫ ───────────────────────────────
