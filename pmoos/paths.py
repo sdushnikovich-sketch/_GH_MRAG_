@@ -28,6 +28,7 @@
         answers.json         — найденные ответы на замечания
         index_state.json     — состояние индексации (прогресс/пауза/возобновление)
         tmp_uploads/         — ВРЕМЕННЫЕ файлы ПД (удаляются после индексации)
+        remarks/             — файлы замечаний для М4 (ПОСТОЯННЫЕ, очисткой не трогаются)
         out/                 — сформированные DOCX/XLSX/экспорт УПРЗА
 """
 from __future__ import annotations
@@ -75,6 +76,7 @@ def project_paths(project: str) -> dict[str, Path]:
         "answers": d / "answers.json",
         "index_state": d / "index_state.json",
         "uploads": d / "tmp_uploads",   # временные файлы ПД
+        "remarks_dir": d / "remarks",   # ПОСТОЯННАЯ папка файлов замечаний (М4)
         "out": d / "out",
     }
 

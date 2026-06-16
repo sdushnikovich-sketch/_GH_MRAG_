@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import atexit
+import time
 
 from ..config import Config
 from ..paths import qdrant_dir, slugify
@@ -53,9 +54,43 @@ class VectorStore:
             url = self.cfg.get("qdrant.url", "http://localhost:6333")
             self._client = QdrantClient(url=url, timeout=60)
         else:
-            self._client = QdrantClient(path=str(qdrant_dir()))
+            last_err = None
+            for _ in range(3):
+                try:
+                    self._client = QdrantClient(path=str(qdrant_dir()))
+                    break
+                except RuntimeError as e:
+                    if "already accessed" in str(e):
+                        last_err = e
+                        time.sleep(1.5)
+                        continue
+                    raise
+            else:
+                raise RuntimeError(
+                    "Локальная база Qdrant занята другим процессом. Обычно это значит, "
+                    "что идёт фоновая индексация (Модуль 2) — дождитесь её завершения "
+                    "или нажмите «⏹ Стоп». Если индексация не идёт, а ошибка осталась — "
+                    "перезапустите приложение (run.bat): предыдущий поиск мог не "
+                    "освободить базу."
+                ) from last_err
         _register_close(self._client)
         return self._client
+
+    def close(self) -> None:
+        """Освободить локальную базу: embedded-Qdrant пускает только ОДИН процесс,
+        поэтому после поиска (М4) клиент нужно закрывать — иначе индексация (М2)
+        не сможет открыть хранилище («already accessed»)."""
+        if self._client is None:
+            return
+        try:
+            self._client.close()
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            _CLIENTS.remove(self._client)
+        except ValueError:
+            pass
+        self._client = None
 
     def ensure_collection(self, project: str) -> None:
         from qdrant_client.http import models as qm
@@ -67,16 +102,21 @@ class VectorStore:
                 collection_name=name,
                 vectors_config=qm.VectorParams(size=self.dim, distance=qm.Distance.COSINE),
             )
-            # payload-индексы (в server-режиме ускоряют фильтрацию;
-            # в embedded — игнорируются, но ошибки не вызывают)
-            for field in ("project", "section", "file", "doc_sha"):
-                try:
-                    c.create_payload_index(
-                        collection_name=name, field_name=field,
-                        field_schema=qm.PayloadSchemaType.KEYWORD,
-                    )
-                except Exception:
-                    pass
+            # payload-индексы нужны только server-Qdrant (ускоряют фильтрацию).
+            # Встроенный (embedded) Qdrant их игнорирует и засоряет журнал
+            # предупреждением UserWarning — поэтому в локальном режиме пропускаем.
+            if self.cfg.get("qdrant.mode", "embedded") == "server":
+                for field in ("project", "section", "file", "doc_sha"):
+                    try:
+                        c.create_payload_index(
+                            collection_name=name, field_name=field,
+                            field_schema=qm.PayloadSchemaType.KEYWORD,
+                        )
+                    except Exception:
+                        pass
+            else:
+                print("[vectorstore] локальный Qdrant: payload-индексы не нужны — пропущены",
+                      flush=True)
 
     def existing_doc_shas(self, project: str) -> set[str]:
         """Список уже проиндексированных отпечатков документов (для дедупликации)."""
@@ -135,10 +175,18 @@ class VectorStore:
         if exclude_sections:
             must_not.append(qm.FieldCondition(key="section", match=qm.MatchAny(any=list(exclude_sections))))
         flt = qm.Filter(must=must or None, must_not=must_not or None) if (must or must_not) else None
-        hits = c.search(
-            collection_name=collection_name(project), query_vector=query_vector.tolist(),
-            limit=top, query_filter=flt, with_payload=True,
-        )
+        if hasattr(c, "query_points"):
+            # qdrant-client >= 1.13: метод search удалён — используем query_points
+            res = c.query_points(
+                collection_name=collection_name(project), query=query_vector.tolist(),
+                limit=top, query_filter=flt, with_payload=True,
+            )
+            hits = list(res.points)
+        else:  # старые версии qdrant-client
+            hits = c.search(
+                collection_name=collection_name(project), query_vector=query_vector.tolist(),
+                limit=top, query_filter=flt, with_payload=True,
+            )
         return [{"id": h.id, "score": float(h.score), "text": (h.payload or {}).get("text", ""),
                  "payload": h.payload or {}} for h in hits]
 

@@ -58,10 +58,14 @@ def _ensure_node(g, nid: str, **attrs) -> None:
 
 
 def _bump_edge(g, u: str, v: str, kind: str) -> None:
+    now = datetime.now().isoformat(timespec="seconds")
     if g.has_edge(u, v):
-        g[u][v]["weight"] = g[u][v].get("weight", 1) + 1
+        d = g[u][v]
+        d["weight"] = d.get("weight", 1) + 1
+        d["last_seen"] = now
+        d.setdefault("first_seen", now)
     else:
-        g.add_edge(u, v, kind=kind, weight=1)
+        g.add_edge(u, v, kind=kind, weight=1, first_seen=now, last_seen=now)
 
 
 def update_from_project(project: str) -> dict[str, int]:

@@ -97,6 +97,13 @@ class HybridRetriever:
         self._corpus_cache: dict[str, _Corpus] = {}
 
     # ---- BM25 corpus -----------------------------------------------------
+    def close(self) -> None:
+        """Освободить embedded-Qdrant (однопроцессный) сразу после поиска."""
+        try:
+            self.store.close()
+        except Exception:  # noqa: BLE001
+            pass
+
     def _load_corpus(self, project: str) -> _Corpus:
         if project in self._corpus_cache:
             return self._corpus_cache[project]

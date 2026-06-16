@@ -1,12 +1,18 @@
 #!/usr/bin/env bash
-# PMOOS-RAG v0.14.2 — установка (Linux/macOS), устойчивая к медленной сети.
+# PMOOS-RAG v0.15.0 — установка (Linux/macOS), устойчивая к медленной сети.
 set -e
-echo "=== PMOOS-RAG v0.14.2 — установка ==="
+echo "=== PMOOS-RAG v0.15.0 — установка ==="
 command -v python3 >/dev/null 2>&1 || { echo "Python 3 не найден"; exit 1; }
 export PIP_DEFAULT_TIMEOUT=120
 
-python3 -m venv .venv
-source .venv/bin/activate
+DATA="${PMOOS_DATA_DIR:-$HOME/.pmoos-rag}"
+mkdir -p "$DATA"
+export PIP_CACHE_DIR="$DATA/pip-cache"
+VENV="$DATA/venv"
+echo "[env] общий venv в папке данных: $VENV"
+echo "[env] новые версии приложения переиспользуют его — повторно ничего не качается"
+if [ ! -f "$VENV/bin/activate" ]; then python3 -m venv "$VENV"; fi
+source "$VENV/bin/activate"
 python -m pip install --upgrade pip --timeout 120 --retries 10
 
 echo "[torch] CUDA 12.4 (для CPU/Mac будет обычная сборка)..."
@@ -26,6 +32,16 @@ if ! pip install --prefer-binary --timeout 60 --retries 2 -r requirements.txt; t
     done
   fi
 fi
+
+cp -f .env.example "$DATA/.env.example"
+if [ ! -f "$DATA/.env" ]; then
+  if [ -f .env ]; then cp .env "$DATA/.env"; echo "[keys] перенесён старый .env из папки приложения";
+  else cp .env.example "$DATA/.env"; fi
+fi
+echo "[keys] файл ключей: $DATA/.env"
+
+echo "[models] скачивание моделей ИИ (bge-m3 + reranker, ~3.4 ГБ) и самопроверка..."
+python setup_models.py || echo "[models] ВНИМАНИЕ: модели не скачались/не прошли проверку — повторите позже: python setup_models.py"
 
 python -c "import numpy; print('NumPy:', numpy.__version__)"
 python -c "import torch; print('CUDA:', torch.cuda.is_available())"

@@ -165,3 +165,112 @@ def build_corrected_oos_docx(project: str, *, original_oos_path: str | Path | No
 def _load_answers(project: str) -> dict[str, Any]:
     from ..pipeline.block1_answers import load_answers
     return load_answers(project)
+
+
+# ───────────── №10-11..14: правки ПРЯМО в исходных томах (жёлтым) ─────────────
+
+def _anchor_token(text: str) -> str | None:
+    """Маркер места из текста правки: «табл. 4.1», «т. 8.3», «раздел 5», «п. 2.3»."""
+    import re as _re
+    m = _re.search(r"(?:табл(?:ица|ице|ицу|\.)?|т\.|разд(?:ел|еле|\.)?|п(?:ункт|\.)\.?)"
+                   r"\s*№?\s*([\d][\d.]*)", (text or "").lower())
+    return m.group(1).rstrip(".") if m else None
+
+
+def _insert_paragraph_after(par, runs):
+    """Вставляет новый абзац СРАЗУ ПОСЛЕ par. runs = [(text, bold, yellow)]."""
+    from docx.text.paragraph import Paragraph
+    from docx.oxml.ns import qn
+    from docx.enum.text import WD_COLOR_INDEX
+    new_p = par._p.makeelement(qn("w:p"), {})
+    par._p.addnext(new_p)
+    np = Paragraph(new_p, par._parent)
+    for t, bold, hl in runs:
+        r = np.add_run(t)
+        r.bold = bold
+        if hl:
+            r.font.highlight_color = WD_COLOR_INDEX.YELLOW
+    return np
+
+
+def write_corrected_volumes(project: str, sources: list) -> list[Path]:
+    """РЕАЛЬНО откорректированные тома ООС: открываем ИСХОДНЫЙ .docx, вставляем
+    правки по принятым/правленым ответам с ЖЁЛТОЙ заливкой — по якорю
+    («табл./п./раздел N») сразу после нужного абзаца, иначе — в конец, в раздел
+    «КОРРЕКТИРОВКИ ПО ЗАМЕЧАНИЯМ ЭКСПЕРТИЗЫ». Документ НЕ пересобирается,
+    поэтому большие тома (десятки МБ) обрабатываются быстро. Если томов
+    несколько — ответы раскладываются по полю «Том ООС» (без тома — в первый).
+    Возвращает пути файлов *_КОРР.docx."""
+    from docx import Document
+    from docx.enum.text import WD_COLOR_INDEX
+    data = _load_answers(project)
+    answers = [a for a in data.get("answers", [])
+               if a.get("status") in ("accepted", "edited")]
+    srcs = [Path(s) for s in sources if s]
+    out_dir = project_paths(project)["out"]
+    out_dir.mkdir(parents=True, exist_ok=True)
+    outs: list[Path] = []
+    if not srcs:
+        return outs
+
+    def _match(a, src: Path) -> bool:
+        v = (a.get("oos_volume") or "").lower().strip()
+        if not v:
+            return False
+        n, stem = src.name.lower(), src.stem.lower()
+        if v in n or n in v or stem in v:
+            return True
+        vp = Path(v)
+        # stem берём ТОЛЬКО если v — имя файла с настоящим расширением
+        # (иначе Path("том 6.1").stem == "том 6" и правка утекает в чужой том)
+        if vp.suffix.lower() in (".docx", ".doc", ".pdf"):
+            return vp.stem.lower() in n
+        return False
+
+    matched_ids = {id(a) for s2 in srcs for a in answers if _match(a, s2)}
+    for si, src in enumerate(srcs):
+        if len(srcs) > 1:
+            mine = [a for a in answers if _match(a, src)]
+            if si == 0:
+                mine += [a for a in answers if id(a) not in matched_ids]
+        else:
+            mine = list(answers)
+        doc = Document(str(src))
+        ptexts = [(p, (p.text or "").lower()) for p in doc.paragraphs]
+        tail = []
+        for a in mine:
+            num = a.get("number", "?")
+            ans = (a.get("user_answer") or a.get("answer") or "").strip()
+            corr = (a.get("correction") or "").strip()
+            runs = [(f"[Изменение по замечанию №{num}] ", True, True)]
+            if ans:
+                runs.append((f"ОТВЕТ: {ans} ", False, True))
+            if corr:
+                runs.append((f"ВНОСИМАЯ ПРАВКА: {corr}", False, True))
+            tok = _anchor_token(corr) or _anchor_token(a.get("remark", ""))
+            target = None
+            if tok:
+                for p, lt in ptexts:
+                    if tok in lt:
+                        target = p
+                        break
+            if target is not None:
+                _insert_paragraph_after(target, runs)
+            else:
+                tail.append(runs)
+        if tail:
+            h = doc.add_paragraph()
+            hr = h.add_run("КОРРЕКТИРОВКИ ПО ЗАМЕЧАНИЯМ ЭКСПЕРТИЗЫ")
+            hr.bold = True
+            for runs in tail:
+                p = doc.add_paragraph()
+                for t, b, hl in runs:
+                    r = p.add_run(t)
+                    r.bold = b
+                    if hl:
+                        r.font.highlight_color = WD_COLOR_INDEX.YELLOW
+        out = out_dir / f"{src.stem}_КОРР.docx"
+        doc.save(str(out))
+        outs.append(out)
+        print(f"[m5] {src.name}: правок {len(mine)} → {out.name}", flush=True)
+    return outs

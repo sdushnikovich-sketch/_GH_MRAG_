@@ -32,8 +32,8 @@ _STATUS_RU = {
     "proposed": "предложено ИИ",
 }
 
-_HEADERS = ["№", "ЗАМЕЧАНИЕ", "ОТВЕТ", "ИСТОЧНИК", "СТАТУС"]
-_WIDTHS_IN = [0.5, 3.4, 4.2, 2.6, 1.1]  # сумма ≈ 11.8" (альбомная Letter, поля 1")
+_HEADERS = ["№", "ТИП", "ТОМ ООС", "ЗАМЕЧАНИЕ", "ОТВЕТ", "ИСТОЧНИК", "СТАТУС"]
+_WIDTHS_IN = [0.45, 1.0, 1.15, 2.9, 3.55, 1.95, 0.8]  # сумма ≈ 11.8" (альбомная Letter, поля 1")
 _HEAD_FILL = "1F3B5B"
 
 
@@ -76,15 +76,17 @@ def build_answers_table_docx(project: str, *, out_path: str | Path | None = None
     for a in rows:
         cells = table.add_row().cells
         cell_text(cells[0], str(a.get("number", "")), size=10)
-        cell_text(cells[1], a.get("remark", "") or "—", size=9)
+        cell_text(cells[1], a.get("category", "") or "—", size=8)
+        cell_text(cells[2], a.get("oos_volume", "") or "—", size=8)
+        cell_text(cells[3], a.get("remark", "") or "—", size=9)
         ans = final_answer_text(a)
         corr = (a.get("correction") or "").strip()
         body = ans if ans else "—"
         if corr and corr not in body:
             body = f"{body}\n\nПравка в ПМООС: {corr}" if ans else f"Правка в ПМООС: {corr}"
-        cell_text(cells[2], body, size=9)
-        cell_text(cells[3], "\n".join(source_ref_lines(a)), size=8, color=(0x44, 0x44, 0x44))
-        cell_text(cells[4], _STATUS_RU.get(a.get("status", ""), a.get("status", "")), size=9)
+        cell_text(cells[4], body, size=9)
+        cell_text(cells[5], "\n".join(source_ref_lines(a)), size=8, color=(0x44, 0x44, 0x44))
+        cell_text(cells[6], _STATUS_RU.get(a.get("status", ""), a.get("status", "")), size=9)
 
     set_col_widths(table, _WIDTHS_IN)
 
@@ -129,6 +131,8 @@ def build_answers_table_xlsx(project: str, *, out_path: str | Path | None = None
             body = f"{body}\n\nПравка в ПМООС: {corr}" if ans else f"Правка в ПМООС: {corr}"
         values = [
             str(a.get("number", "")),
+            a.get("category", "") or "",
+            a.get("oos_volume", "") or "",
             a.get("remark", "") or "",
             body or "—",
             "\n".join(source_ref_lines(a)),
@@ -140,7 +144,7 @@ def build_answers_table_xlsx(project: str, *, out_path: str | Path | None = None
             cell.border = border
         r += 1
 
-    widths = [6, 50, 60, 38, 16]
+    widths = [6, 15, 20, 46, 56, 32, 15]
     from openpyxl.utils import get_column_letter
     for i, w in enumerate(widths, 1):
         ws.column_dimensions[get_column_letter(i)].width = w

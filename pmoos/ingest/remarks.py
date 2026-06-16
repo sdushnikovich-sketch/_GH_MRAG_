@@ -102,9 +102,58 @@ def _ai_extract(text: str, cfg: Config) -> list[Remark]:
     return out
 
 
+_OLE_MAGIC = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
+
+
+def _is_ole(path: Path) -> bool:
+    try:
+        with open(path, "rb") as fh:
+            return fh.read(8) == _OLE_MAGIC
+    except OSError:
+        return False
+
+
+def _convert_doc_with_word(path: Path) -> Path:
+    """Старый бинарный .doc → .docx через установленный Microsoft Word (COM).
+    Возвращает путь к сконвертированному файлу (рядом, *.converted.docx)."""
+    out = path.with_suffix(".converted.docx")
+    if out.exists() and out.stat().st_size > 0:
+        return out
+    try:
+        import win32com.client  # pywin32 уже стоит на Windows (зависимость qdrant)
+    except Exception as e:  # noqa: BLE001
+        raise RuntimeError(
+            f"«{path.name}» — файл старого формата .doc. Для автоматической конвертации "
+            f"нужен установленный Microsoft Word. Либо откройте файл в Word и "
+            f"пересохраните как .docx, затем загрузите заново.") from e
+    word = None
+    try:
+        word = win32com.client.Dispatch("Word.Application")
+        word.Visible = False
+        doc = word.Documents.Open(str(path))
+        doc.SaveAs2(str(out), FileFormat=16)  # 16 = wdFormatXMLDocument (.docx)
+        doc.Close(False)
+    except Exception as e:  # noqa: BLE001
+        raise RuntimeError(
+            f"Не удалось сконвертировать «{path.name}» через Microsoft Word: {e}. "
+            f"Откройте файл в Word и пересохраните как .docx.") from e
+    finally:
+        try:
+            if word is not None:
+                word.Quit()
+        except Exception:  # noqa: BLE001
+            pass
+    print(f"[remarks] {path.name}: .doc сконвертирован через Word → {out.name}", flush=True)
+    return out
+
+
 def load_remarks(path: Path, cfg: Config) -> list[Remark]:
     """Главная функция: пытается таблицей, при неудаче — через ИИ."""
     ext = path.suffix.lower()
+    # старый бинарный .doc (или .doc, переименованный в .docx) → конвертация через Word
+    if ext == ".doc" or (ext == ".docx" and _is_ole(path)):
+        path = _convert_doc_with_word(path)
+        ext = ".docx"
     remarks: list[Remark] = []
     if ext == ".docx":
         best: list[Remark] = []
@@ -132,11 +181,35 @@ def load_remarks(path: Path, cfg: Config) -> list[Remark]:
     return _ai_extract(full, cfg)
 
 
-_NUM_RE = re.compile(r"(?m)^\s*(\d{1,3})[.)]\s+(.+)$")
+# Начало пункта: «12.», «12)» в начале строки, либо номер ОДИН на строке
+# (так PDF часто отдаёт колонку «№» из таблиц).
+_NUM_START = re.compile(r"(?m)^\s*(\d{1,3})\s*(?:[.)]\s+|\s*$)")
 
 
 def _split_numbered(text: str) -> list[Remark]:
+    """Детерминированный разбор нумерованного списка с МНОГОСТРОЧНЫМИ пунктами.
+
+    Раньше бралась только первая строка каждого пункта — поэтому замечания из
+    PDF уходили в ИИ-фолбэк и падали на невалидном JSON. Теперь текст режется
+    по началам номеров, а тело пункта — всё до следующего номера.
+    """
+    text = text or ""
+    starts = [(m.start(), m.end(), m.group(1)) for m in _NUM_START.finditer(text)]
+    if not starts:
+        return []
+    # защита от ложных срабатываний (числа в тексте): номера должны в целом
+    # возрастать; «провалы» назад отбрасываем (кроме перезапуска с 1)
+    filt: list[tuple[int, int, str]] = []
+    prev = 0
+    for s, e, num in starts:
+        n = int(num)
+        if n >= prev or n == 1:
+            filt.append((s, e, num))
+            prev = n
     out: list[Remark] = []
-    for m in _NUM_RE.finditer(text or ""):
-        out.append(Remark(number=m.group(1), text=m.group(2).strip()))
+    for i, (s, e, num) in enumerate(filt):
+        end = filt[i + 1][0] if i + 1 < len(filt) else len(text)
+        body = re.sub(r"\s*\n\s*", " ", text[e:end]).strip()
+        if len(body) >= 10:
+            out.append(Remark(number=num, text=body))
     return out

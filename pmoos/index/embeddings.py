@@ -21,7 +21,7 @@ import threading
 import numpy as np
 
 from ..config import Config
-from ..paths import emb_cache_path, models_dir
+from ..paths import emb_cache_path
 
 _LOCK = threading.Lock()
 
@@ -131,16 +131,37 @@ class Embedder:
         from sentence_transformers import SentenceTransformer
         print(f"[embeddings] загрузка {self.model_name} на {self.device}", flush=True)
         token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGINGFACE_HUB_TOKEN")
-        kwargs = dict(device=self.device, cache_folder=str(models_dir()))
-        # фикс CVE: заставляем грузить safetensors, а не .bin через torch.load
-        model_kwargs = {"use_safetensors": True} if self.use_safetensors else {}
-        try:
-            self._model = SentenceTransformer(
-                self.model_name, model_kwargs=model_kwargs, token=token, **kwargs
-            )
-        except TypeError:
-            # старые версии sentence-transformers без model_kwargs/token
-            self._model = SentenceTransformer(self.model_name, **kwargs)
+        # Кэш моделей НЕ задаём параметром: единый каталог определяется HF_HOME
+        # (config.py: <данные>/models/hub) — тот же, куда качают setup_models.py
+        # и предзагрузка Модуля 2. Так модель не скачивается дважды.
+        kwargs = dict(device=self.device)
+
+        def _try(force_safetensors: bool):
+            mk = {"use_safetensors": True} if force_safetensors else {}
+            try:
+                return SentenceTransformer(self.model_name, model_kwargs=mk,
+                                           token=token, **kwargs)
+            except TypeError:
+                # старые версии sentence-transformers без model_kwargs/token
+                return SentenceTransformer(self.model_name, **kwargs)
+
+        # Сначала строгий safetensors (фикс CVE-2025-32434). Но некоторые модели
+        # (в т.ч. BAAI/bge-m3) публикуются ТОЛЬКО с pytorch_model.bin — тогда
+        # откатываемся на .bin: под torch>=2.6 это безопасно (weights_only=True
+        # по умолчанию), а torch==2.6 ставится установщиком явно.
+        if self.use_safetensors:
+            try:
+                self._model = _try(True)
+            except OSError as e:
+                if "model.safetensors" in str(e):
+                    print(f"[embeddings] у {self.model_name} нет model.safetensors — "
+                          f"загружаю pytorch_model.bin (безопасно: torch>=2.6, weights_only)",
+                          flush=True)
+                    self._model = _try(False)
+                else:
+                    raise
+        else:
+            self._model = _try(False)
         try:
             self._model.max_seq_length = self.max_length
         except Exception:

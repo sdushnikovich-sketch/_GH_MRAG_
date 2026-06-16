@@ -27,26 +27,50 @@ class Reranker:
             return self._model
         import os
         from sentence_transformers import CrossEncoder
-        from ..paths import models_dir
 
         device = resolve_device(self.cfg.get("embedding.device", "auto"))
         token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
-        kwargs: dict[str, Any] = {
+        # ВАЖНО: НЕ передаём cache_folder/cache_dir — у CrossEncoder в
+        # sentence-transformers 3.3 такого параметра нет (был краш TypeError).
+        # Кэш моделей единый и задаётся переменной HF_HOME (см. config.py):
+        # <данные>/models/hub — туда же качают setup_models.py и предзагрузка М2.
+        base: dict[str, Any] = {
             "device": device,
             "max_length": 512,
-            "cache_folder": str(models_dir()),
-            # форсируем safetensors (фикс CVE-2025-32434)
-            "automodel_args": {"use_safetensors": True},
         }
         if token:
-            kwargs["trust_remote_code"] = False
+            base["trust_remote_code"] = False
+
+        def _try(force_safetensors: bool):
+            kw = dict(base)
+            if force_safetensors:
+                # форсируем safetensors (фикс CVE-2025-32434)
+                kw["automodel_args"] = {"use_safetensors": True}
+            # Сигнатура CrossEncoder различается между версиями
+            # sentence-transformers: при TypeError снимаем необязательные
+            # аргументы по одному (лесенка), а не один фиксированный.
+            while True:
+                try:
+                    return CrossEncoder(self.model_name, **kw)
+                except TypeError:
+                    for opt in ("automodel_args", "trust_remote_code", "max_length"):
+                        if opt in kw:
+                            kw.pop(opt)
+                            break
+                    else:
+                        raise
+
         try:
-            self._model = CrossEncoder(self.model_name, **kwargs)
-        except TypeError:
-            # старые версии sentence-transformers без automodel_args
-            kwargs.pop("automodel_args", None)
-            self._model = CrossEncoder(self.model_name, device=device,
-                                       max_length=512, cache_folder=str(models_dir()))
+            self._model = _try(True)
+        except OSError as e:
+            # Репозиторий модели без safetensors (только .bin) — безопасный откат
+            # (torch>=2.6: weights_only=True по умолчанию).
+            if "model.safetensors" in str(e):
+                print(f"[reranker] у {self.model_name} нет model.safetensors — "
+                      f"загружаю .bin (безопасно: torch>=2.6, weights_only)", flush=True)
+                self._model = _try(False)
+            else:
+                raise
         return self._model
 
     def rerank(self, query: str, candidates: list[dict], *, top: int = 8,

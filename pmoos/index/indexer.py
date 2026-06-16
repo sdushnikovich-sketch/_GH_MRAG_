@@ -112,6 +112,36 @@ def reset_state(project: str) -> None:
     write_state(project, st)
 
 
+def stop_indexing(project: str) -> bool:
+    """Жёстко остановить фоновую индексацию (кнопка «⏹ Стоп»).
+    Завершает процесс по pid; прогресс по уже готовым файлам сохраняется."""
+    st = read_state(project)
+    pid = int(st.get("pid") or 0)
+    killed = False
+    if pid and _pid_alive(pid):
+        try:
+            if os.name == "nt":
+                import ctypes
+                PROCESS_TERMINATE = 0x0001
+                h = ctypes.windll.kernel32.OpenProcess(PROCESS_TERMINATE, False, pid)
+                if h:
+                    killed = bool(ctypes.windll.kernel32.TerminateProcess(h, 1))
+                    ctypes.windll.kernel32.CloseHandle(h)
+            else:
+                import signal
+                os.kill(pid, signal.SIGTERM)
+                killed = True
+        except Exception:  # noqa: BLE001
+            pass
+    st["status"] = "paused"
+    st["pause_requested"] = True
+    st["pid"] = 0
+    st["current_file"] = ""
+    st["message"] = "⏹ Остановлено пользователем. «⏯ Продолжить» возобновит с места остановки."
+    write_state(project, st)
+    return killed
+
+
 def _start_heartbeat(project: str) -> None:
     """Фоновый «пульс»: каждые 5 с обновляет heartbeat в состоянии. Бьётся даже во
     время долгой загрузки модели — по нему видно, что процесс жив, а не завис."""
@@ -232,7 +262,22 @@ def run_indexing(project: str, cfg: Config | None = None, *, object_type: str | 
 
     # 2) Загрузка модели эмбеддингов и БД — в защите от ошибок (частая причина
     #    «зависания»: не доустановлены зависимости или первый раз качается модель).
-    model_name = str(cfg.get("embeddings.model", "BAAI/bge-m3"))
+    model_name = str(cfg.get("embedding.model", cfg.get("embeddings.model", "BAAI/bge-m3")))
+    reranker_name = str(cfg.get("reranker.model", "BAAI/bge-reranker-v2-m3"))
+    # Скачиваем заранее СРАЗУ ОБЕ модели (эмбеддер + reranker), чтобы Модуль 4
+    # потом не ждал первой загрузки. Ход скачивания виден в «Журнале индексации».
+    for _m in (model_name, reranker_name):
+        if _hf_model_cached(_m):
+            continue
+        state["message"] = f"Скачивание модели {_m} (ход — в «Журнале индексации»)…"
+        write_state(project, state)
+        print(f"[indexer] скачиваю модель: {_m}", flush=True)
+        try:
+            from huggingface_hub import snapshot_download
+            snapshot_download(_m)
+            print(f"[indexer] модель {_m}: скачана ✅", flush=True)
+        except Exception as e:  # noqa: BLE001
+            print(f"[indexer] не удалось скачать {_m}: {e}", flush=True)
     if _hf_model_cached(model_name):
         state["message"] = f"Загрузка модели {model_name} с диска (кэш найден)…"
     else:
@@ -251,9 +296,15 @@ def run_indexing(project: str, cfg: Config | None = None, *, object_type: str | 
         known_shas = store.existing_doc_shas(project)
     except Exception as e:  # noqa: BLE001
         traceback.print_exc()
+        err = str(e)
+        hint = ""
+        if ("float8" in err) or ("PreTrainedModel" in err) or ("Could not import module" in err):
+            hint = ("НЕСОВМЕСТИМОСТЬ ВЕРСИЙ: установлен слишком новый transformers для "
+                    "torch 2.6. Запустите install.bat ещё раз — он поставит совместимые "
+                    "версии (transformers<4.50, sentence-transformers<3.4). ")
         state["status"] = "error"
         state["message"] = (
-            f"Не удалось загрузить модель/векторную БД: {e}. "
+            f"{hint}Не удалось загрузить модель/векторную БД: {e}. "
             f"Проверьте, что установлены зависимости (запустите install.bat ещё раз — "
             f"возможно, из-за обрыва сети не доустановились sentence-transformers/qdrant), "
             f"и есть интернет для первой загрузки модели bge-m3. "
@@ -381,7 +432,7 @@ def start_background(project: str, *, object_type: str | None = None) -> int:
 
     lp = log_path(project)
     lp.parent.mkdir(parents=True, exist_ok=True)
-    logf = open(lp, "ab")  # сюда идут stdout/stderr процесса: ход загрузки модели и ошибки
+    logf = open(lp, "wb")  # №10-2: журнал ОБНУЛЯЕТСЯ при каждом запуске; сюда идут stdout/stderr
     logf.write(f"\n===== {_now()} запуск индексации: {project} =====\n".encode("utf-8"))
     logf.flush()
 
@@ -408,6 +459,74 @@ def start_background(project: str, *, object_type: str | None = None) -> int:
     return proc.pid
 
 
+def prefetch_models(project: str, models: list[str] | None = None) -> dict:
+    """Скачать в кэш HF сразу ВСЕ локальные модели (эмбеддер + reranker), без
+    загрузки в память. Замечание пользователя: «надо скачивать сразу все модели»."""
+    cfg = load_config()
+    if not models:
+        models = [
+            str(cfg.get("embedding.model", cfg.get("embeddings.model", "BAAI/bge-m3"))),
+            str(cfg.get("reranker.model", "BAAI/bge-reranker-v2-m3")),
+        ]
+    results: dict[str, str] = {}
+    state = read_state(project)
+    state.update({"status": "running", "pid": os.getpid(),
+                  "message": f"Скачивание моделей: всего {len(models)}…"})
+    write_state(project, state)
+    for i, m in enumerate(models, 1):
+        state["message"] = f"Скачивание модели {i}/{len(models)}: {m}…"
+        write_state(project, state)
+        print(f"[prefetch] {i}/{len(models)}: {m}", flush=True)
+        if _hf_model_cached(m):
+            print(f"[prefetch] {m}: уже в кэше ✅", flush=True)
+            results[m] = "cached"
+            continue
+        try:
+            from huggingface_hub import snapshot_download
+            snapshot_download(m)
+            results[m] = "downloaded"
+            print(f"[prefetch] {m}: скачана ✅", flush=True)
+        except Exception as e:  # noqa: BLE001
+            traceback.print_exc()
+            results[m] = f"ошибка: {e}"
+    ok = all(v in ("cached", "downloaded") for v in results.values())
+    parts = "; ".join(f"{m.split('/')[-1]} — {'✅' if v in ('cached', 'downloaded') else v}"
+                      for m, v in results.items())
+    state["status"] = "done" if ok else "error"
+    state["message"] = (("Все модели скачаны: " if ok else
+                         "Не все модели скачались (подробности в журнале): ") + parts)
+    write_state(project, state)
+    return results
+
+
+def start_prefetch_background(project: str) -> int:
+    """Скачивание всех моделей отдельным фоновым процессом (журнал и «пульс» — общие)."""
+    st = read_state(project)
+    st.update({"status": "running", "pid": 0, "current_file": "",
+               "message": "Запуск фонового скачивания моделей…"})
+    write_state(project, st)
+    lp = log_path(project)
+    lp.parent.mkdir(parents=True, exist_ok=True)
+    logf = open(lp, "wb")  # журнал обнуляется и при предзагрузке моделей
+    logf.write(f"\n===== {_now()} скачивание моделей: {project} =====\n".encode("utf-8"))
+    logf.flush()
+    env = dict(os.environ, PYTHONIOENCODING="utf-8", PYTHONUNBUFFERED="1")
+    args = [sys.executable, "-m", "pmoos.index.indexer", "--project", project, "--prefetch-models"]
+    kwargs: dict[str, Any] = {"env": env, "cwd": str(APP_ROOT), "stdout": logf, "stderr": logf}
+    if os.name == "nt":
+        kwargs["creationflags"] = 0x00000200 | 0x00000008
+    else:
+        kwargs["start_new_session"] = True
+    proc = subprocess.Popen(args, **kwargs)
+    logf.close()
+    st = read_state(project)
+    st["pid"] = proc.pid
+    if st.get("status") != "running":
+        st["status"] = "running"
+    write_state(project, st)
+    return proc.pid
+
+
 def progress_summary(project: str) -> dict:
     st = read_state(project)
     total_f = st.get("total_files", 0)
@@ -426,8 +545,9 @@ def progress_summary(project: str) -> dict:
     hb_age = _age_sec(st.get("heartbeat") or st.get("updated_at") or "")
     tail = log_tail(project, 12)
 
-    # 1) Статус «running», но процесс МЁРТВ → упал. Показываем конец журнала.
-    if status == "running" and not running and done_f < total_f:
+    # 1) Статус «running», но процесс МЁРТВ → упал (если бы он завершился сам,
+    #    он бы выставил done/error перед выходом). Показываем конец журнала.
+    if status == "running" and not running:
         status = "error"
         message = ("Фоновый процесс индексации завершился аварийно. Частые причины: "
                    "не доустановлены зависимости (повторите install.bat) или прервалась "
@@ -455,11 +575,16 @@ def _main() -> int:
     ap = argparse.ArgumentParser(description="Фоновая индексация PMOOS-RAG")
     ap.add_argument("--project", required=True)
     ap.add_argument("--object-type", default=None)
+    ap.add_argument("--prefetch-models", action="store_true",
+                    help="Скачать все локальные модели (эмбеддер + reranker) и выйти")
     a = ap.parse_args()
     print(f"[indexer] процесс запущен, pid={os.getpid()}", flush=True)
     _start_heartbeat(a.project)  # «пульс» — сразу, ещё до тяжёлых импортов
     try:
-        run_indexing(a.project, object_type=a.object_type)
+        if a.prefetch_models:
+            prefetch_models(a.project)
+        else:
+            run_indexing(a.project, object_type=a.object_type)
     except Exception as e:  # noqa: BLE001
         traceback.print_exc()
         st = read_state(a.project)

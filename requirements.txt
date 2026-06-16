@@ -16,10 +16,14 @@ streamlit>=1.49
 numpy>=1.26,<2.3
 
 # --- RAG: vector DB, embeddings, reranker, hybrid search ---
+# IMPORTANT: transformers/sentence-transformers are PINNED below versions that
+# require torch>=2.7 (newest transformers references torch.float8_e8m0fnu and
+# crashes on torch 2.6 with "Could not import module 'PreTrainedModel'").
 qdrant-client>=1.9
-sentence-transformers>=3.0
-transformers>=4.41
-accelerate>=0.30
+sentence-transformers>=3.0,<3.4
+transformers>=4.41,<4.50
+huggingface_hub>=0.24,<0.30
+accelerate>=0.30,<1.4
 rank-bm25>=0.2.2
 
 # --- document parsing / OCR ---

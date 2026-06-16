@@ -77,6 +77,35 @@ def _process(raw: str) -> dict:
     return data
 
 
+# №10-6: категории замечаний для систематизации в М4
+CATEGORIES = ["Перерасчёт", "Нормативы", "Доп. документы", "Ввести данные",
+              "Правка по источникам"]
+
+
+def _classify_remark(text: str) -> str:
+    """Детерминированная классификация замечания по типу требуемого действия."""
+    t = (text or "").lower()
+
+    def has(*ws: str) -> bool:
+        return any(w in t for w in ws)
+
+    if has("перерасч", "пересчит"):
+        return "Перерасчёт"
+    if has("расчёт", "расчет", "рассеиван") and has("уточн", "выполн", "привести",
+                                                    "откоррект", "провести", "повтор"):
+        return "Перерасчёт"
+    if has("гост", "санпин", "снип", "гн 2", "сп 2", "сп 5", "норматив", "методик",
+           "приказ", "постановлен", "-фз", "фз-", "в соответствии с требованиями"):
+        return "Нормативы"
+    if has("приложить", "представить", "предоставить", "лиценз", "договор", "справк",
+           "письмо", "протокол", "паспорт отход", "сертификат"):
+        return "Доп. документы"
+    if has("указать", "заполнить", "внести данные", "привести данные", "добавить данные",
+           "отсутствуют данные", "не указан", "не приведен", "не приведён", "не представлены данные"):
+        return "Ввести данные"
+    return "Правка по источникам"
+
+
 def run_block1(project: str, cfg: Config | None = None, *,
                remarks_path: str | Path | None = None,
                object_type: str | None = None,
@@ -87,27 +116,64 @@ def run_block1(project: str, cfg: Config | None = None, *,
 
     # 1) замечания
     if remarks_path is None:
-        # ищем файл замечаний в загрузках по эвристике имени
+        # ищем файл замечаний: сначала постоянная папка remarks/, затем
+        # (для обратной совместимости) старое место — tmp_uploads
         cand = []
-        if paths["uploads"].exists():
-            for fp in paths["uploads"].rglob("*"):
-                if fp.is_file() and any(k in fp.name.lower() for k in ("замечан", "remark")):
-                    cand.append(fp)
+        for folder in (paths.get("remarks_dir"), paths["uploads"]):
+            if folder and folder.exists():
+                for fp in sorted(folder.rglob("*")):
+                    if fp.is_file() and any(k in fp.name.lower() for k in ("замечан", "remark")):
+                        cand.append(fp)
         remarks_path = cand[0] if cand else None
     if not remarks_path:
-        raise FileNotFoundError("Не найден файл замечаний (ожидается имя со словом «замечания»).")
-    remarks: list[Remark] = load_remarks(Path(remarks_path), cfg)
+        raise FileNotFoundError("Не найден файл замечаний (ожидается имя со словом «замечания»). "
+                                "Загрузите его в поле выше.")
+    rp = Path(remarks_path)
+    if not rp.exists():
+        raise FileNotFoundError(
+            f"Файл замечаний не найден на диске: {rp}. Загрузите файл заново в поле выше — "
+            f"теперь он сохраняется в постоянную папку remarks/ и не удаляется кнопкой "
+            f"«Очистить временные файлы».")
+    if rp.suffix.lower() == ".docx":
+        with open(rp, "rb") as _fh:
+            _head = _fh.read(8)
+        if _head[:2] != b"PK":
+            if _head == b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1":
+                # это старый бинарный .doc, переименованный в .docx —
+                # load_remarks сам сконвертирует его через Microsoft Word
+                pass
+            else:
+                raise ValueError(
+                    f"Файл «{rp.name}» повреждён или это не настоящий docx (нет ZIP-заголовка). "
+                    f"Откройте его в Word и пересохраните, либо загрузите заново.")
+    remarks: list[Remark] = load_remarks(rp, cfg)
     if not remarks:
         raise ValueError("Из файла замечаний не удалось извлечь ни одного пункта.")
 
     # 2) ресурсы и батчевый retrieval только по разделам-источникам
     retr = HybridRetriever(cfg)
-    src_codes = source_section_codes(object_type)
-    queries = [r.text for r in remarks]
-    if progress:
-        progress(0, len(remarks), "Поиск источников по замечаниям…")
-    hits_per = retr.batch_search(project, queries, sections=src_codes or None,
-                                 top=int(cfg.get("retrieval.top_k", 8)))
+    try:
+        src_codes = source_section_codes(object_type)
+        queries = [r.text for r in remarks]
+        if progress:
+            progress(0, len(remarks), "Поиск источников по замечаниям…")
+        hits_per = retr.batch_search(project, queries, sections=src_codes or None,
+                                     top=int(cfg.get("retrieval.top_k", 8)))
+        # №10-5: к какому ТОМУ ООС относится замечание — лёгкий поиск top-1
+        # только по разделу OOS (томов может быть несколько)
+        try:
+            oos_per = retr.batch_search(project, queries, sections=["OOS"], top=1)
+        except Exception:  # noqa: BLE001
+            oos_per = []
+    finally:
+        # освобождаем embedded-Qdrant СРАЗУ: он однопроцессный, и удержание
+        # блокировки ломало фоновую индексацию («already accessed»)
+        retr.close()
+    oos_by_num: dict[str, str] = {}
+    for _k, _r in enumerate(remarks):
+        _hit = (oos_per[_k][0] if _k < len(oos_per) and oos_per[_k] else None)
+        oos_by_num[str(_r.number)] = ((_hit.get("payload") or {}).get("file", "")
+                                      if _hit else "")
 
     # 3) формируем задания для ИИ (с few-shot из памяти прошлых проектов)
     use_mem = bool(cfg.get("memory.enabled", True))
@@ -156,7 +222,10 @@ def run_block1(project: str, cfg: Config | None = None, *,
         answers.append({
             "number": r.number,
             "remark": r.text,
-            "category": r.category,
+            "oos_volume": oos_by_num.get(str(r.number), ""),  # №10-5
+            # №10-6: категория из файла замечаний (если была колонка), иначе —
+            # автоматическая классификация по тексту замечания
+            "category": (getattr(r, "category", "") or _classify_remark(r.text)),
             "answer": answer_text,
             "correction": data.get("correction", ""),
             "confidence": data.get("confidence", ""),
@@ -187,6 +256,16 @@ def _save(project: str, data: dict) -> Path:
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
     return p
+
+
+def reset_answers(project: str) -> None:
+    """№10-4: полный сброс предложенных ответов (кнопка «🗑 Сбросить» в М4).
+    Файл answers.json очищается; журнал решений decisions.jsonl сохраняется."""
+    paths = project_paths(project)
+    paths["answers"].parent.mkdir(parents=True, exist_ok=True)
+    paths["answers"].write_text(
+        json.dumps({"answers": [], "reset_at": datetime.now().isoformat()},
+                   ensure_ascii=False, indent=1), encoding="utf-8")
 
 
 def load_answers(project: str) -> dict[str, Any]:

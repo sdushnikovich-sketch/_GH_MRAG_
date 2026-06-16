@@ -1,8 +1,17 @@
 @echo off
 chcp 65001 >nul
 cd /d "%~dp0"
-if not exist .venv\Scripts\activate.bat goto NOVENV
+set "PMOOS_DATA=%PMOOS_DATA_DIR%"
+if "%PMOOS_DATA%"=="" set "PMOOS_DATA=%USERPROFILE%\.pmoos-rag"
+if exist "%PMOOS_DATA%\venv\Scripts\activate.bat" goto MACTD
+if exist .venv\Scripts\activate.bat goto MACTL
+goto NOVENV
+:MACTD
+call "%PMOOS_DATA%\venv\Scripts\activate.bat"
+goto MGO
+:MACTL
 call .venv\Scripts\activate.bat
+:MGO
 
 REM If arguments were passed - run them directly (advanced mode):
 REM   run_module.bat modules\module1_inventory.py --project "Name" --uploads files
